@@ -1,4 +1,27 @@
 import numpy as np
+import time
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
+from tensorflow.keras.datasets import mnist
+
+def get_full_mnist_data():
+    (x_train, _), (_, _) = mnist.load_data()
+    x_train = x_train.reshape(-1, 28 * 28) / 255.0
+    return x_train
+
+def get_mnist_data(batch_size):
+
+    # load the MNIST dataset
+    (x_train, _), (_, _) = mnist.load_data()
+
+    # preprocess: flatten the images and normalize
+    x_train = x_train.reshape(-1, 28 * 28) / 255.0
+
+    # segment the training data into required batch size
+    A_list = []
+    for i in range(0, len(x_train), batch_size):
+        if i + batch_size <= len(x_train):
+            A_list.append(x_train[i:i + batch_size])
 
 def inner_product(a, b):
 
@@ -193,7 +216,7 @@ def bidiagonalize_housholder(A):
 
     return U, A, V
     
-def golub_reinsch(A, max_iterations = 1000, tol = 1e-10):
+def svd_golub_reinsch(A, max_iterations = 1000, tol = 1e-10):
 
     m = A.shape[0]
     n = A.shape[1]
@@ -229,7 +252,7 @@ def golub_reinsch(A, max_iterations = 1000, tol = 1e-10):
 
         n += 1
 
-    return U, sigma, V
+    return U, sigma, V.T
 
 def streaming_svd(A_list, num_singular_values, forget_factor):
 
@@ -240,10 +263,10 @@ def streaming_svd(A_list, num_singular_values, forget_factor):
     A0 = A_list[0]  
 
     # QR decomposition
-    Q, R = np.linalg.qr(A0)
+    Q, R = qr_factorization_mgs(A0)
 
     # SVD of R
-    U0, D0, Vt0 = np.linalg.svd(R, full_matrices=False)
+    U0, D0, Vt0 = svd_golub_reinsch(R)
 
     # truncated left singular vectors
     U0 = Q @ U0 
@@ -258,10 +281,10 @@ def streaming_svd(A_list, num_singular_values, forget_factor):
         
         # compute QR decomposition after concatenation of new data
         Ai_tilde = np.hstack((forget_factor * U_list[-1] @ np.diag(D_list[-1]), Ai))
-        Q, R = np.linalg.qr(Ai_tilde)
+        Q, R = qr_factorization_mgs(Ai_tilde)
         
         # compute SVD of R
-        Ui_hat, Di_hat, Vt_hat = np.linalg.svd(R, full_matrices=False)
+        Ui_hat, Di_hat, Vt_hat = svd_golub_reinsch(R)
         
         # preserve the first K columns of Ui_hat
         Ui_tilde = Ui_hat[:, :num_singular_values]
@@ -276,23 +299,137 @@ def streaming_svd(A_list, num_singular_values, forget_factor):
     
     return U_list, D_list
 
+def measure_runtime(batch_sizes, num_trials, num_singular_values, forget_factor):
+    
+    runtimes = []
+    
+    for b in batch_sizes:
+        trial_runtimes = []
+        
+        for _ in range(num_trials):
+            
+            # get the MNIST data with the current batch size
+            A_list = get_mnist_data(b)
 
-# test of streaming_svd
+            # measure the runtime for the current batch size
+            start_time = time.time()
+            streaming_svd(A_list, num_singular_values, forget_factor)
+            end_time = time.time()
+            
+            trial_runtimes.append(end_time - start_time)
+        
+        # Average runtime over trials
+        avg_runtime = np.mean(trial_runtimes)
+        runtimes.append(avg_runtime)
+    
+    return runtimes
 
-A_list = [np.random.randn(100, 20) for _ in range(10)]
-K = 5 
-forget_factor = 0.9
+def plot_runtimes_batchsize(batch_sizes, runtimes):
 
-U_list, D_list = streaming_svd(A_list, K, forget_factor)
+    plt.figure(figsize=(8, 6))
+    plt.plot(batch_sizes, runtimes, marker='o')
+    plt.xlabel('Batch Size (B)')
+    plt.ylabel('Average Runtime (seconds)')
+    plt.title('Average Runtime vs. Batch Size for Streaming SVD')
+    plt.grid(True)
+    plt.show()
+
+def plot_svd(batch_size, num_singular_values, forget_factor):
+
+    # get the MNIST data
+    A_list = get_mnist_data(batch_size)
+
+    # Perform streaming SVD
+    U_list, _ = streaming_svd(A_list, num_singular_values, forget_factor)
+
+    # Create animation
+    fig = plt.figure(figsize=(8, 6))
+
+    # Animation function
+    def animate(i):
+        plot_vectors(U_list, i)
+
+    # Create the animation object
+    ani = FuncAnimation(fig, animate, frames=len(A_list), repeat=False)
+
+    # Save the animation as a GIF or MP4
+    # To save as MP4, you can uncomment the MP4 writer
+    ani.save('singular_vectors_evolution.gif', writer=PillowWriter(fps=2))
+
+    # Alternatively, to save as MP4 (requires ffmpeg or other video writers)
+    # ani.save('singular_vectors_evolution.mp4', writer='ffmpeg', fps=2)
+
+    plt.show()
+
+def plot_vectors(U_list, batch_num):
+    plt.clf()
+    U = U_list[batch_num]
+    
+    for i in range(3):  # Only plotting the first 3 singular vectors
+        plt.plot(U[:, i], label=f'Singular Vector {i+1}')
+    
+    plt.title(f'Evolution of First 3 Singular Vectors - Batch {batch_num + 1}')
+    plt.xlabel('Vector Components')
+    plt.ylabel('Magnitude')
+    plt.legend()
+    plt.ylim([-1, 1])
+    plt.grid(True)
+
+def compare_svd(batch_size, forget_factors, num_singular_values):
+
+    A_full = get_full_mnist_data()
+
+    # perform SVD using numpy
+    U_full, D_full, Vt_full = np.linalg.svd(A_full, full_matrices=False)
+
+    singular_vectors = {}
+
+    # iterate through each forget factor
+
+    for forget_factor in forget_factors:
+
+        # get MNIST data in the required batch size
+        A_list = get_mnist_data(batch_size)
+
+        # perform streaming SVD
+        U_list, _ = streaming_svd(A_list, num_singular_values, forget_factor)
+        singular_vectors[forget_factor] = U_list
+
+    # Plotting
+    plt.figure(figsize=(15, 10))
+
+    for i, (forget_factor, U) in enumerate(singular_vectors.items()):
+        plt.subplot(len(singular_vectors), 1, i + 1)
+        plt.title(f'Forget Factor: {forget_factor}')
+        for j in range(min(3, U.shape[2])):  # Plotting the first 3 singular vectors
+            plt.plot(U[:, -1][:, j], label=f'Singular Vector {j + 1} (Streaming SVD)')
+        plt.plot(U_full[:, j], label=f'Singular Vector {j + 1} (np.linalg.svd)', linestyle='--')
+        plt.legend()
+
+    plt.tight_layout()
+    plt.show()
 
 
-# # test
+# plot svd evolution with batch size 50
+batch_size = 50
+num_singular_values = 5  
+forget_factor = 1.0
 
-# A = np.random.rand(3, 3)
-# print(A)
+plot_svd(batch_size, num_singular_values, forget_factor)
 
-# U, sigma, V = golub_reinsch(A)
+# plot runtime vs batch size
+# batch_sizes = [10, 20, 50, 100, 200, 500]
+# num_singular_values = 5  
+# forget_factor = 1.0
+# num_trials = 10  
 
-# print(U)
-# print(sigma)
-# print(V.T)
+# runtimes = measure_runtime(batch_sizes, num_trials, num_singular_values, forget_factor)
+# plot_runtimes_batchsize(batch_sizes, runtimes)
+
+# compare svd generated by streaming svd and numpy svd for different forget factors
+# batch_size = 50
+# forget_factors = [0.5, 0.9, 0.99, 0.999]
+# num_singular_values = 5
+
+# compare_svd(batch_size, forget_factors, num_singular_values)
+
