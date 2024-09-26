@@ -193,7 +193,7 @@ def bidiagonalize_housholder(A):
 
     return U, A, V
     
-def golub_reinsch(A, max_iterations = 1000, tol = 1e-10):
+def svd_golub_reinsch(A, max_iterations = 1000, tol = 1e-10):
 
     m = A.shape[0]
     n = A.shape[1]
@@ -204,18 +204,22 @@ def golub_reinsch(A, max_iterations = 1000, tol = 1e-10):
 
     _, B, _ = bidiagonalize_housholder(A)
 
-    U = np.eye(m)
-    V = np.eye(n)
+    # extract the square (n x n) part of B (diagonal and superdiagonal)
+    B_square = B[:n, :n]
+    B = B_square
+
+    Q_R = np.eye(n)
+    Q_L = np.eye(n)
 
     for _ in range(max_iterations):
 
-        Q, R = qr_factorization_householder(B)
+        Qi, Ri = qr_factorization_householder(B)
 
-        B = R @ Q
+        B = Ri @ Qi
 
         # Update Q_L and Q_R
-        U = U @ Q  
-        V = Q @ V 
+        Q_L = Q_L @ Qi  
+        Q_R = Qi @ Q_R 
 
         # Construct diagonal matrix from singular values (diagonal elements of B)
         sigma = np.diag(np.diagonal(B))
@@ -224,12 +228,7 @@ def golub_reinsch(A, max_iterations = 1000, tol = 1e-10):
         if np.allclose(B - np.diag(np.diagonal(B)), 0, atol=tol):
             break
 
-        if n > 100:
-            break
-
-        n += 1
-
-    return U, sigma, V
+    return Q_R, sigma, Q_L.T
 
 def streaming_svd(A_list, num_singular_values, forget_factor):
 
@@ -237,31 +236,38 @@ def streaming_svd(A_list, num_singular_values, forget_factor):
     D_list = []  # To store the singular values after each batch
 
     # initial data matrix
-    A0 = A_list[0]  
+    A0 = A_list[0] 
 
     # QR decomposition
-    Q, R = np.linalg.qr(A0)
+    Q, R = qr_factorization_mgs(A0)
 
     # SVD of R
-    U0, D0, Vt0 = np.linalg.svd(R, full_matrices=False)
+    U_, D0, _ = svd_golub_reinsch(R)
+
+    # truncate to retain the top K values
+    U_ = U_[:, :num_singular_values]
+    Q = Q[:, :num_singular_values]  
 
     # truncated left singular vectors
-    U0 = Q @ U0 
+    U0 = Q @ U_
+    D0 = D0[:num_singular_values] 
 
-    U_list.append(U0[:, :num_singular_values])
-    D_list.append(D0[:num_singular_values])
-    
+    U_list.append(U0)
+    D_list.append(D0)
+
     # Iterate over remaining batches
     for i in range(1, len(A_list)):
 
         Ai = A_list[i]  # New data batch
+
         
         # compute QR decomposition after concatenation of new data
-        Ai_tilde = np.hstack((forget_factor * U_list[-1] @ np.diag(D_list[-1]), Ai))
-        Q, R = np.linalg.qr(Ai_tilde)
+        prev_info = forget_factor * (U_list[-1] @ D_list[-1])
+        Ai_tilde = np.hstack((prev_info, Ai))
+        Q, R = qr_factorization_mgs(Ai_tilde)
         
         # compute SVD of R
-        Ui_hat, Di_hat, Vt_hat = np.linalg.svd(R, full_matrices=False)
+        Ui_hat, Di_hat, _ = svd_golub_reinsch(R)
         
         # preserve the first K columns of Ui_hat
         Ui_tilde = Ui_hat[:, :num_singular_values]
@@ -275,7 +281,6 @@ def streaming_svd(A_list, num_singular_values, forget_factor):
         D_list.append(Di)
     
     return U_list, D_list
-
 
 # test of streaming_svd
 
